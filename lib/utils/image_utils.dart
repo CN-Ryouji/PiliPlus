@@ -1,4 +1,4 @@
-import 'dart:async';
+import 'dart:async' show FutureOr;
 import 'dart:io' show File, Platform;
 import 'dart:math' as math;
 import 'dart:typed_data' show Uint8List;
@@ -18,16 +18,13 @@ import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
-import 'package:intl/intl.dart' show DateFormat;
 import 'package:live_photo_maker/live_photo_maker.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:saver_gallery/saver_gallery.dart';
 import 'package:share_plus/share_plus.dart';
 
 abstract final class ImageUtils {
-  static String get time =>
-      DateFormat('yyyy-MM-dd_HH-mm-ss').format(DateTime.now());
   static bool silentDownImg = Pref.silentDownImg;
   static final _albumPath = Platform.isAndroid
       ? 'Pictures/${Constants.appName}'
@@ -170,7 +167,6 @@ abstract final class ImageUtils {
       final result = await Future.wait(futures, eagerError: true);
       bool success = true;
       if (PlatformUtils.isMobile) {
-        final delList = <String>[];
         final saveList = <SaveFileData>[];
         for (final i in result) {
           if (i.statusCode == 200) {
@@ -186,9 +182,6 @@ abstract final class ImageUtils {
           }
         }
         await SaverGallery.saveFiles(saveList, skipIfExists: false);
-        for (final i in delList) {
-          File(i).tryDel();
-        }
       } else {
         for (final res in result) {
           if (res.statusCode == 200) {
@@ -286,7 +279,7 @@ abstract final class ImageUtils {
         SmartDialog.showToast("取消保存");
         return null;
       }
-      await File(savePath).writeAsBytes(bytes);
+      await File(savePath.toFilePath()).writeAsBytes(bytes);
       SmartDialog.showToast(' 已保存 ');
       res = SaveResult(true, null);
     }
@@ -322,7 +315,7 @@ abstract final class ImageUtils {
         SmartDialog.showToast("取消保存");
         return;
       }
-      await file.copy(savePath);
+      await file.copy(savePath.toFilePath());
       res = SaveResult(true, null);
     }
     if (needToast) {

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:PiliPlus/common/constants.dart';
+import 'package:PiliPlus/common/widgets/dialog/simple_dialog_option.dart';
 import 'package:PiliPlus/grpc/audio.dart';
 import 'package:PiliPlus/grpc/bilibili/app/listener/v1.pb.dart'
     show
@@ -15,10 +17,14 @@ import 'package:PiliPlus/grpc/bilibili/app/listener/v1.pb.dart'
 import 'package:PiliPlus/http/browser_ua.dart';
 import 'package:PiliPlus/http/constants.dart';
 import 'package:PiliPlus/http/loading_state.dart';
+import 'package:PiliPlus/models/common/audio_normalization.dart';
+import 'package:PiliPlus/models/video/play/url.dart' as http_model show Volume;
 import 'package:PiliPlus/pages/common/common_intro_controller.dart'
     show FavMixin;
 import 'package:PiliPlus/pages/dynamics_repost/view.dart';
 import 'package:PiliPlus/pages/main_reply/view.dart';
+import 'package:PiliPlus/pages/setting/models/play_settings.dart'
+    show kMaxVolume;
 import 'package:PiliPlus/pages/sponsor_block/block_mixin.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/triple_mixin.dart';
@@ -28,6 +34,7 @@ import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
+import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -42,9 +49,9 @@ import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:fixnum/fixnum.dart' show Int64;
-import 'package:flutter/material.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 
 class AudioController extends GetxController
@@ -53,7 +60,8 @@ class AudioController extends GetxController
         TripleMixin,
         FavMixin,
         BlockConfigMixin,
-        BlockMixin {
+        BlockMixin,
+        AudioNormalizationMixin {
   late Int64 id;
   late Int64 oid;
   late List<Int64> subId;
@@ -71,8 +79,8 @@ class AudioController extends GetxController
   late int cacheAudioQa;
 
   late bool isDragging = false;
-  final Rx<Duration> position = Duration.zero.obs;
-  final Rx<Duration> duration = Duration.zero.obs;
+  final RxInt position = RxInt(0);
+  final RxInt duration = RxInt(0);
 
   late final AnimationController animController;
 
@@ -152,7 +160,12 @@ class AudioController extends GetxController
     final hasAudioUrl = audioUrl != null;
     if (hasAudioUrl) {
       _querySponsorBlock();
-      _onOpenMedia(audioUrl, ua: BrowserUa.pc, referer: HttpString.baseUrl);
+      _onOpenMedia(
+        audioUrl,
+        ua: BrowserUa.pc,
+        referer: HttpString.baseUrl,
+        volume: _videoDetailController?.volume,
+      );
     }
     ConnectivityUtils.isWiFi.then((isWiFi) {
       cacheAudioQa = isWiFi ? Pref.defaultAudioQa : Pref.defaultAudioQaCellular;
@@ -282,18 +295,31 @@ class AudioController extends GetxController
   void _onPlay(PlayURLResp data) {
     final PlayInfo? playInfo = data.playerInfo.values.firstOrNull;
     if (playInfo != null) {
+      http_model.Volume? volume;
+      if (playInfo.hasVolume()) {
+        final volumeInfo = playInfo.volume;
+        volume = http_model.Volume(
+          measuredI: volumeInfo.measuredI,
+          measuredLra: volumeInfo.measuredLra,
+          measuredTp: volumeInfo.measuredTp,
+          measuredThreshold: volumeInfo.measuredThreshold,
+          targetOffset: volumeInfo.targetOffset,
+          targetI: volumeInfo.targetI,
+          targetTp: volumeInfo.targetTp,
+        );
+      }
       if (playInfo.hasPlayDash()) {
         final playDash = playInfo.playDash;
         final audios = playDash.audio;
         if (audios.isEmpty) {
           return;
         }
-        position.value = Duration.zero;
+        position.value = 0;
         final audio = audios.findClosestTarget(
           (e) => e.id <= cacheAudioQa,
           (a, b) => a.id > b.id ? a : b,
         );
-        _onOpenMedia(VideoUtils.getCdnUrl(audio.playUrls));
+        _onOpenMedia(VideoUtils.getCdnUrl(audio.playUrls), volume: volume);
       } else if (playInfo.hasPlayUrl()) {
         final playUrl = playInfo.playUrl;
         final durls = playUrl.durl;
@@ -301,8 +327,8 @@ class AudioController extends GetxController
           return;
         }
         final durl = durls.first;
-        position.value = Duration.zero;
-        _onOpenMedia(VideoUtils.getCdnUrl(durl.playUrls));
+        position.value = 0;
+        _onOpenMedia(VideoUtils.getCdnUrl(durl.playUrls), volume: volume);
       }
     }
   }
@@ -311,15 +337,17 @@ class AudioController extends GetxController
     String url, {
     String ua = Constants.userAgentApp,
     String? referer,
+    http_model.Volume? volume,
   }) async {
     await _initPlayerIfNeeded();
+    final extras = audioFilterExtras(volume);
     player
       ?..setMediaHeader(
         userAgent: ua,
         // mpv cannot clear referer option
         headers: {'Referer': ?referer},
       )
-      ..open(Media(url, start: _start));
+      ..open(Media(url, start: _start, extras: extras));
     _start = null;
   }
 
@@ -328,11 +356,16 @@ class AudioController extends GetxController
     _hasInit = true;
     assert(player == null, _subscriptions = null);
     player = await Player.create(
-      configuration: PlatformUtils.isDesktop
-          ? PlayerConfiguration(
-              options: {'volume': (desktopVolume.value * 100).toString()},
-            )
-          : const PlayerConfiguration(),
+      configuration: PlayerConfiguration(
+        options: {
+          if (Platform.isAndroid) 'ao': Pref.audioOutput,
+          'volume': PlatformUtils.isDesktop
+              ? (desktopVolume.value * 100).toString()
+              : Pref.playerVolume.toString(),
+          'volume-max': kMaxVolume.toString(),
+          ...Pref.initBuffer(),
+        },
+      ),
     );
     if (isClosed) {
       player!.dispose();
@@ -343,13 +376,16 @@ class AudioController extends GetxController
     _subscriptions = [
       stream.position.listen((position) {
         if (isDragging) return;
-        if (position.inSeconds != this.position.value.inSeconds) {
-          this.position.value = position;
+        final seconds = position.inSeconds;
+        if (seconds != this.position.value) {
+          this.position.value = seconds;
           _videoDetailController?.playedTime = position;
           videoPlayerServiceHandler?.onPositionChange(position);
         }
       }),
-      stream.duration.listen(duration.call),
+      stream.duration.listen((duration) {
+        this.duration.value = duration.inSeconds;
+      }),
       stream.playing.listen((playing) {
         final PlayerStatus playerStatus;
         if (playing) {
@@ -362,7 +398,7 @@ class AudioController extends GetxController
         videoPlayerServiceHandler?.onStatusChange(playerStatus, false, false);
       }),
       stream.completed.listen((completed) {
-        _videoDetailController?.playedTime = duration.value;
+        _videoDetailController?.playedTime = player!.state.duration;
         videoPlayerServiceHandler?.onStatusChange(
           PlayerStatus.completed,
           false,
@@ -527,62 +563,45 @@ class AudioController extends GetxController
         : '${HttpString.baseUrl}/audio/au$oid';
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (_) => SimpleDialog(
         clipBehavior: Clip.hardEdge,
         contentPadding: const EdgeInsets.symmetric(vertical: 12),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              dense: true,
-              title: const Text(
-                '复制链接',
-                style: TextStyle(fontSize: 14),
-              ),
-              onTap: () {
+        children: [
+          DialogOption(
+            child: const Text('复制链接', style: TextStyle(fontSize: 14)),
+            onPressed: () {
+              Get.back();
+              Utils.copyText(audioUrl);
+            },
+          ),
+          DialogOption(
+            child: const Text('其它app打开', style: TextStyle(fontSize: 14)),
+            onPressed: () {
+              Get.back();
+              PiliAndroidHelper.openUrl(audioUrl);
+            },
+          ),
+          if (PlatformUtils.isMobile)
+            DialogOption(
+              child: const Text('分享视频', style: TextStyle(fontSize: 14)),
+              onPressed: () {
                 Get.back();
-                Utils.copyText(audioUrl);
+                if (audioItem.value case DetailItem(
+                  :final arc,
+                  :final owner,
+                )) {
+                  ShareUtils.shareText(
+                    '${arc.title} '
+                    'UP主: ${owner.name}'
+                    ' - $audioUrl',
+                  );
+                }
               },
             ),
-            ListTile(
-              dense: true,
-              title: const Text(
-                '其它app打开',
-                style: TextStyle(fontSize: 14),
-              ),
-              onTap: () {
-                Get.back();
-                PageUtils.launchURL(audioUrl);
-              },
-            ),
-            if (PlatformUtils.isMobile)
-              ListTile(
-                dense: true,
-                title: const Text(
-                  '分享视频',
-                  style: TextStyle(fontSize: 14),
-                ),
-                onTap: () {
-                  Get.back();
-                  if (audioItem.value case DetailItem(
-                    :final arc,
-                    :final owner,
-                  )) {
-                    ShareUtils.shareText(
-                      '${arc.title} '
-                      'UP主: ${owner.name}'
-                      ' - $audioUrl',
-                    );
-                  }
-                },
-              ),
-            ListTile(
-              dense: true,
-              title: const Text(
-                '分享至动态',
-                style: TextStyle(fontSize: 14),
-              ),
-              onTap: () {
+          if (isLogin)
+            DialogOption(
+              child: const Text('分享至动态', style: TextStyle(fontSize: 14)),
+              onPressed: () {
                 Get.back();
                 if (audioItem.value case DetailItem(
                   :final arc,
@@ -603,52 +622,41 @@ class AudioController extends GetxController
                 }
               },
             ),
-            if (isUgc)
-              ListTile(
-                dense: true,
-                title: const Text(
-                  '分享至消息',
-                  style: TextStyle(fontSize: 14),
-                ),
-                onTap: () {
-                  Get.back();
-                  if (audioItem.value case DetailItem(
-                    :final arc,
-                    :final owner,
-                  )) {
-                    try {
-                      PageUtils.pmShare(
-                        context,
-                        content: {
-                          "id": oid.toString(),
-                          "title": arc.title,
-                          "headline": arc.title,
-                          "source": 5,
-                          "thumb": arc.cover,
-                          "author": owner.name,
-                          "author_id": owner.mid.toString(),
-                        },
-                      );
-                    } catch (e) {
-                      SmartDialog.showToast(e.toString());
-                    }
+          if (isUgc && isLogin)
+            DialogOption(
+              child: const Text('分享至消息', style: TextStyle(fontSize: 14)),
+              onPressed: () {
+                Get.back();
+                if (audioItem.value case DetailItem(
+                  :final arc,
+                  :final owner,
+                )) {
+                  try {
+                    PageUtils.pmShare(
+                      context,
+                      content: {
+                        "id": oid.toString(),
+                        "title": arc.title,
+                        "headline": arc.title,
+                        "source": 5,
+                        "thumb": arc.cover,
+                        "author": owner.name,
+                        "author_id": owner.mid.toString(),
+                      },
+                    );
+                  } catch (e) {
+                    SmartDialog.showToast(e.toString());
                   }
-                },
-              ),
-          ],
-        ),
+                }
+              },
+            ),
+        ],
       ),
     );
   }
 
-  void playOrPause() {
-    if (player case final player?) {
-      if ((duration.value - position.value).inMilliseconds < 50) {
-        player.seek(Duration.zero).whenComplete(player.play);
-      } else {
-        player.playOrPause();
-      }
-    }
+  Future<void>? playOrPause() {
+    return player?.playOrPause();
   }
 
   bool playPrev() {
@@ -762,14 +770,14 @@ class AudioController extends GetxController
   BlockConfigMixin get blockConfig => this;
 
   @override
-  int get currPosInMilliseconds => position.value.inMilliseconds;
+  int get currPosInMilliseconds => player?.state.position.inMilliseconds ?? 0;
+
+  @override
+  int? get timeLength => player?.state.duration.inMilliseconds ?? 0;
 
   @override
   Future<void>? seekTo(Duration duration, {required bool isSeek}) =>
       onSeek(duration);
-
-  @override
-  int? get timeLength => duration.value.inMilliseconds;
 
   @override
   bool get autoPlay => true;

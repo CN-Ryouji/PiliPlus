@@ -1,5 +1,6 @@
-import 'dart:io';
+import 'dart:io' show File, HttpException;
 
+import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/button/toolbar_icon_button.dart';
 import 'package:PiliPlus/common/widgets/flutter/text_field/controller.dart';
@@ -28,12 +29,12 @@ import 'package:cached_network_image_ce/cached_network_image.dart'
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:easy_debounce/easy_throttle.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:material_ui/material_ui.dart';
 
 abstract class CommonRichTextPubPage
     extends CommonPublishPage<List<RichTextItem>> {
@@ -225,9 +226,10 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
       const Duration(milliseconds: 500),
       () async {
         try {
-          List<XFile> pickedFiles = await imagePicker.pickMultiImage(
+          final pickedFiles = await imagePicker.pickMultiImage(
             limit: limit,
             imageQuality: 100,
+            requestFullMetadata: false,
           );
           if (pickedFiles.isNotEmpty) {
             for (int i = 0; i < pickedFiles.length; i++) {
@@ -251,8 +253,8 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
     if (emote is e.Emote) {
       final isTextEmote = width == null;
       onInsertText(
-        isTextEmote ? emote.text! : '\uFFFC',
-        RichTextType.emoji,
+        isTextEmote ? emote.text! : Style.placeHolder,
+        .emoji,
         rawText: emote.text!,
         emote: isTextEmote
             ? null
@@ -264,8 +266,8 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
       );
     } else if (emote is Emoticon) {
       onInsertText(
-        '\uFFFC',
-        RichTextType.emoji,
+        Style.placeHolder,
+        .emoji,
         rawText: emote.emoji!,
         emote: Emote(
           url: emote.url!,
@@ -281,13 +283,13 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
     final list = <Map<String, dynamic>>[];
     for (final e in editController.items) {
       switch (e.type) {
-        case RichTextType.text || RichTextType.composing || RichTextType.common:
+        case .text || .composing || .common || .latex:
           list.add({
             "raw_text": e.text,
             "type": 1,
             "biz_id": "",
           });
-        case RichTextType.at:
+        case .at:
           list
             ..add({
               "raw_text": '@${e.rawText}',
@@ -299,13 +301,13 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
               "type": 1,
               "biz_id": "",
             });
-        case RichTextType.emoji:
+        case .emoji:
           list.add({
             "raw_text": e.rawText,
             "type": 9,
             "biz_id": "",
           });
-        case RichTextType.vote:
+        case .vote:
           list
             ..add({
               "raw_text": e.rawText,
@@ -334,8 +336,8 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
         _onInsertUser(res, fromClick);
       } else if (res is Set<MentionItem>) {
         for (final e in res) {
-          e.checked = false;
-          _onInsertUser(e, fromClick);
+          _onInsertUser(e..checked = false, fromClick);
+          fromClick = true;
         }
         res.clear();
       }
@@ -345,7 +347,7 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
   void _onInsertUser(MentionItem e, bool fromClick) {
     onInsertText(
       '@${e.name} ',
-      RichTextType.at,
+      .at,
       rawText: e.name,
       id: e.uid,
       fromClick: fromClick,
@@ -373,7 +375,7 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
       TextEditingDelta delta;
 
       if (selection.isCollapsed) {
-        if (type == RichTextType.at && fromClick == false) {
+        if (type == .at && fromClick == false) {
           delta = RichTextEditingDeltaReplacement(
             oldText: oldValue.text,
             replacementText: text,
@@ -463,13 +465,7 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
       final isEmoji = panelType.value == PanelType.emoji;
       return ToolbarIconButton(
         tooltip: isEmoji ? '输入' : '表情',
-        onPressed: () {
-          if (isEmoji) {
-            updatePanelType(PanelType.keyboard);
-          } else {
-            updatePanelType(PanelType.emoji);
-          }
-        },
+        onPressed: () => updatePanelType(isEmoji ? .keyboard : .emoji),
         icon: isEmoji
             ? const Icon(Icons.keyboard, size: 22)
             : const Icon(Icons.emoji_emotions, size: 22),
@@ -490,13 +486,7 @@ abstract class CommonRichTextPubPageState<T extends CommonRichTextPubPage>
       final isMore = panelType.value == PanelType.more;
       return ToolbarIconButton(
         tooltip: isMore ? '输入' : '更多',
-        onPressed: () {
-          if (isMore) {
-            updatePanelType(PanelType.keyboard);
-          } else {
-            updatePanelType(PanelType.more);
-          }
-        },
+        onPressed: () => updatePanelType(isMore ? .keyboard : .more),
         icon: isMore
             ? const Icon(Icons.keyboard, size: 22)
             : const Icon(Icons.add_circle_outline, size: 22),
